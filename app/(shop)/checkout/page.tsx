@@ -23,7 +23,6 @@ import { useRouter } from 'next/navigation'
 import { useCartStore } from '@/store/cartStore'
 import { useCheckoutStore } from '@/store/checkoutStore'
 import { useUserStore } from '@/store/userStore'
-import { calculateWalletFee, getWalletFeeInfo } from '@/lib/utils/fees'
 import { 
   MapPinIcon, 
   TruckIcon, 
@@ -48,6 +47,8 @@ interface VendorConfig {
   paymentType: 'half_payment' | 'full_payment' // يمكن إضافة أنواع أخرى
   instaPayAccount?: string // رقم حساب Instapay الخاص بالبائع
   instaPayName?: string // اسم صاحب الحساب
+  walletNumber?: string // رقم المحفظة الخاص بالبائع
+  walletName?: string // اسم صاحب المحفظة
   instaPayLink?: string // لينك Instapay للدفع المباشر
 }
 
@@ -57,25 +58,33 @@ const VENDOR_CONFIGS: VendorConfig[] = [
     paymentType: 'full_payment',
     instaPayAccount: '01144747314',
     instaPayName: 'يوسف إيهاب',
+    walletNumber: '01144747314',
+    walletName: 'يوسف إيهاب',
     instaPayLink: 'https://ipn.eg/S/yoihab/instapay/0ct8h5'
   },
   {
     vendorId: 352,
     paymentType: 'full_payment',
     instaPayAccount: '01281333831',
-     instaPayName: 'ادهم ا*** ب****',
+    instaPayName: 'ادهم ا*** ب****',
+    walletNumber: '01281333831',
+    walletName: 'ادهم ا*** ب****',
   },
   {
     vendorId: 351,
     paymentType: 'full_payment',
     instaPayAccount: '01281333831',
     instaPayName: 'ادهم ا*** ب****',
+    walletNumber: '01281333831',
+    walletName: 'ادهم ا*** ب****',
   },
   {
     vendorId: 74,
     paymentType: 'full_payment',
     instaPayAccount: '01062971959',
-    instaPayName: "احمد س*** ع********"
+    instaPayName: "احمد س*** ع********",
+    walletNumber: '01062971959',
+    walletName: 'احمد س*** ع********'
   },
   // يمكن إضافة vendors آخرين هنا بسهولة
   // {
@@ -87,15 +96,25 @@ const VENDOR_CONFIGS: VendorConfig[] = [
   // },
 ]
 
-// Fixed payment method: Instapay only
+// Fixed payment methods: Wallet + Instapay (customer must choose one)
 const FIXED_PAYMENT_METHODS: PaymentMethod[] = [
   {
+    id: 'wallet',
+    title: 'الدفع عبر المحفظة',
+    description: 'حوّل إلى رقم المحفظة ثم ارفع صورة إثبات الدفع',
+    enabled: true,
+    requiresProof: true,
+    icon: '/images/wallet.webp',
+    accountNumber: process.env.NEXT_PUBLIC_WALLET_ACCOUNT_NUMBER || process.env.NEXT_PUBLIC_CONTACT_PHONE || '01144747314',
+    accountName: process.env.NEXT_PUBLIC_WALLET_ACCOUNT_NAME || process.env.NEXT_PUBLIC_VENDOR_NAME || 'ابو يوسف',
+  },
+  {
     id: 'instapay',
-    title: 'الدفع عبر فودافون كاش أو Instapay',
+    title: 'الدفع عبر Instapay',
     description: 'قم بتحويل المبلغ إلى حساب Instapay ثم ارفع صورة إثبات الدفع',
     enabled: true,
     requiresProof: true,
-    icon: '/vocash.webp',
+    icon: '/images/instapay.webp',
     accountNumber: process.env.NEXT_PUBLIC_INSTAPAY_ACCOUNT_NUMBER || '01144747314',
     accountName: process.env.NEXT_PUBLIC_INSTAPAY_ACCOUNT_NAME || 'ابو يوسف',
   }
@@ -167,15 +186,19 @@ export default function CheckoutPage() {
   // Get vendor-specific Instapay info or use default
   const instaPayAccount = vendorConfig?.instaPayAccount || process.env.NEXT_PUBLIC_INSTAPAY_ACCOUNT_NUMBER || '01144747314'
   const instaPayName = vendorConfig?.instaPayName || process.env.NEXT_PUBLIC_INSTAPAY_ACCOUNT_NAME || 'ابو يوسف'
+  const walletNumber = vendorConfig?.walletNumber || process.env.NEXT_PUBLIC_WALLET_ACCOUNT_NUMBER || process.env.NEXT_PUBLIC_CONTACT_PHONE || '01144747314'
+  const walletName = vendorConfig?.walletName || process.env.NEXT_PUBLIC_WALLET_ACCOUNT_NAME || process.env.NEXT_PUBLIC_VENDOR_NAME || 'ابو يوسف'
   const instaPayLink = vendorConfig?.instaPayLink || process.env.NEXT_PUBLIC_INSTAPAY_LINK || 'https://ipn.eg/S/ahmeedwaleed2004/instapay/0ct8h5'
+  const selectedPaymentIsWallet = checkoutData.paymentMethod?.id === 'wallet'
+  const selectedAccountNumber = selectedPaymentIsWallet ? walletNumber : instaPayAccount
+  const selectedAccountName = selectedPaymentIsWallet ? walletName : instaPayName
 
-  // Set Instapay as default payment method on mount (ALWAYS - it's the only option)
+  // Force customer to choose payment method explicitly on checkout open
   useEffect(() => {
-    // Force Instapay as payment method since it's the only option
-    if (FIXED_PAYMENT_METHODS.length > 0) {
-      setPaymentMethod(FIXED_PAYMENT_METHODS[0])
-      console.log('✅ Instapay payment method auto-selected')
-    }
+    setPaymentMethod(null)
+    setPaymentProof(null)
+    setPaymentValid(false)
+    console.log('🧾 Payment method reset - customer must choose Wallet or Instapay')
   }, [])
 
   // Define calculateShippingCost using useCallback so it can be used in useEffect and loadSavedAddresses
@@ -229,18 +252,6 @@ export default function CheckoutPage() {
       setCalculatingShipping(false)
     }
   }, [totalPrice, setShippingMethod, setShippingMethods, setShippingValid])
-
-  // Ensure payment method is always set (double-check after hydration)
-  useEffect(() => {
-    if (_hasHydrated && FIXED_PAYMENT_METHODS.length > 0) {
-      if (!checkoutData.paymentMethod) {
-        console.log('🔄 Re-applying Instapay payment method after hydration')
-        setPaymentMethod(FIXED_PAYMENT_METHODS[0])
-      } else if (checkoutData.paymentMethod.id === 'instapay') {
-        console.log('✅ Instapay payment method already selected')
-      }
-    }
-  }, [_hasHydrated, checkoutData.paymentMethod])
 
   // Auto-calculate shipping if address exists but no shipping method is set
   useEffect(() => {
@@ -375,6 +386,7 @@ export default function CheckoutPage() {
 
   const handlePaymentMethodSelect = (method: PaymentMethod) => {
     setPaymentMethod(method)
+    setPaymentProof(null)
     setPaymentValid(!method.requiresProof)
   }
 
@@ -585,6 +597,10 @@ export default function CheckoutPage() {
         {
           key: '_vendor_name',
           value: cartItems[0]?.vendor?.store_name || ''
+        },
+        {
+          key: '_payment_channel',
+          value: checkoutData.paymentMethod?.id || ''
         }
       ]
 
@@ -872,9 +888,11 @@ export default function CheckoutPage() {
   const halfPaymentAmount = isHalfPayment ? Math.round(totalPrice / 2) : totalPrice
   const remainingAmount = isHalfPayment ? totalPrice - halfPaymentAmount : 0
   
-  // Calculate wallet fee based on the amount to be paid now (halfPaymentAmount if half payment)
-  const walletFee = checkoutData.paymentMethod?.id === 'instapay' ? calculateWalletFee(halfPaymentAmount) : 0
-  const walletFeeInfo = getWalletFeeInfo()
+  // Wallet fee: 1% only when payment method is wallet
+  const walletFeePercentage = 1
+  const walletFee = checkoutData.paymentMethod?.id === 'wallet'
+    ? Math.round((halfPaymentAmount * (walletFeePercentage / 100)) * 100) / 100
+    : 0
   
   // Debug log for half payment
   console.log('💰 Payment Calculation:', {
@@ -886,6 +904,9 @@ export default function CheckoutPage() {
   })
   
   const totalAmount = halfPaymentAmount + walletFee // Shipping is separate (COD)
+  const selectedPaymentMethod = paymentMethods.find(
+    (method) => method.id === checkoutData.paymentMethod?.id
+  )
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100" dir="rtl">
@@ -1310,7 +1331,12 @@ export default function CheckoutPage() {
                   {paymentValid ? (
                     <CheckCircleIcon className="w-6 h-6 text-white" />
                   ) : (
-                    <OptimizedImage src="/vocash.webp" alt="Vo Cash Or Instapay" width={50} height={50} />
+                    <OptimizedImage
+                      src={checkoutData.paymentMethod?.id === 'wallet' ? '/images/wallet.webp' : '/images/instapay.webp'}
+                      alt="Wallet Or Instapay"
+                      width={50}
+                      height={50}
+                    />
                   )}
                 </div>
                 <div>
@@ -1326,38 +1352,47 @@ export default function CheckoutPage() {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {paymentMethods.map((method) => (
-                    <div key={method.id}>
+                  <div className="grid grid-cols-2 gap-2.5 md:gap-4">
+                    {paymentMethods.map((method) => (
                       <label
+                        key={method.id}
                         className={`
-                          flex items-center justify-between p-2 md:p-4 rounded-xl border-2 cursor-pointer
-                          transition-all hover:shadow-md
+                          relative flex flex-col items-center justify-center p-3 md:p-5 text-center rounded-xl border-2 cursor-pointer
+                          transition-all hover:shadow-md min-h-[150px] md:min-h-[170px]
                           ${
                             checkoutData.paymentMethod?.id === method.id
-                              ? 'border-brand-500 bg-brand-50 shadow-md'
-                              : 'border-gray-200 hover:border-brand-300'
+                              ? 'border-brand-500 bg-brand-50 shadow-md scale-[1.01]'
+                              : 'border-gray-200 hover:border-brand-300 bg-white'
                           }
                         `}
                       >
-                        <div className="flex items-center flex-1 gap-4">
-                          <input
-                            type="radio"
-                            name="payment"
-                            checked={checkoutData.paymentMethod?.id === method.id}
-                            onChange={() => handlePaymentMethodSelect(method)}
-                            className="w-5 h-5 border-gray-300 text-brand-600 focus:ring-brand-500"
-                          />
-                          <div className="flex-1">
-                            <p className="font-semibold text-gray-900">{method.title}</p>
-                          </div>
-                        </div>
-                      </label>
+                        <input
+                          type="radio"
+                          name="payment"
+                          checked={checkoutData.paymentMethod?.id === method.id}
+                          onChange={() => handlePaymentMethodSelect(method)}
+                          className="absolute w-5 h-5 border-gray-300 top-3 right-3 text-brand-600 focus:ring-brand-500"
+                        />
 
-                      {/* Instapay Payment Proof Upload */}
-                      {checkoutData.paymentMethod?.id === method.id &&
-                        method.requiresProof &&
-                        method.id === 'instapay' && (
-                          <div className="p-4 mt-4 border md:p-6 bg-gradient-to-br from-brand-50 to-blue-50 rounded-xl border-brand-200">
+                        <div className="mb-3">
+                          <OptimizedImage
+                            src={method.id === 'wallet' ? '/images/wallet.webp' : '/images/instapay.webp'}
+                            alt={method.title}
+                            width={64}
+                            height={64}
+                            className="object-contain w-12 h-12 md:w-16 md:h-16"
+                          />
+                        </div>
+                        <p className="text-xs font-bold text-gray-900 md:text-base">{method.title}</p>
+                        <p className="mt-1 text-[11px] md:text-xs text-gray-500 leading-4 md:leading-5 max-w-[220px]">{method.description}</p>
+                      </label>
+                    ))}
+                  </div>
+
+                  {/* Payment Proof Upload */}
+                  {selectedPaymentMethod?.requiresProof &&
+                    (selectedPaymentMethod.id === 'instapay' || selectedPaymentMethod.id === 'wallet') && (
+                      <div className="p-4 mt-2 border md:p-6 bg-gradient-to-br from-brand-50 to-blue-50 rounded-xl border-brand-200">
                             <h3 className="flex items-center gap-2 mb-4 font-semibold text-gray-900">
                               <ExclamationCircleIcon className="w-5 h-5 text-brand-600" />
                                الدفع عبر المحفظة أو Instapay
@@ -1391,11 +1426,11 @@ export default function CheckoutPage() {
                                   <span className="text-gray-600">رقم الحساب:</span>
                                   <div className="flex items-center gap-2">
                                     <span className="font-mono text-lg font-bold text-brand-600">
-                                      {instaPayAccount}
+                                      {selectedAccountNumber}
                                     </span>
                                     <button
                                       onClick={() => {
-                                        navigator.clipboard.writeText(instaPayAccount)
+                                        navigator.clipboard.writeText(selectedAccountNumber)
                                         toast.success('تم نسخ الرقم!')
                                       }}
                                       className="p-2 transition-colors rounded-lg hover:bg-brand-100"
@@ -1412,7 +1447,7 @@ export default function CheckoutPage() {
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-600">الاسم:</span>
                                   <span className="font-semibold text-gray-900">
-                                    {instaPayName}
+                                    {selectedAccountName}
                                   </span>
                                 </div>
                                 
@@ -1434,7 +1469,7 @@ export default function CheckoutPage() {
                                 {/* Order Breakdown */}
                                 <div className="pt-3 mt-3 space-y-2 border-t border-gray-200">
                                   
-                                  {walletFeeInfo.enabled && (
+                                  {selectedPaymentIsWallet ? (
                                     <>
                                     <div className="flex items-center justify-between text-sm">
                                     <span className="text-gray-600">قيمة الطلب:</span>
@@ -1443,19 +1478,18 @@ export default function CheckoutPage() {
                                     </span>
                                   </div>
                                       <div className="flex items-center justify-between text-sm">
-                                        <span className="text-gray-600">رسوم المحفظة ({walletFeeInfo.percentage}%):</span>
+                                        <span className="text-gray-600">رسوم المحفظة ({walletFeePercentage}%):</span>
                                         <span className="font-medium text-gray-900">
                                           {Math.round(walletFee)} جنيه
                                         </span>
                                       </div>
                                       <div className="pr-4 text-xs text-gray-500">
-                                        الحد الأدنى {walletFeeInfo.min} جنيه • الحد الأقصى {walletFeeInfo.max} جنيه
+                                        يتم احتساب رسوم 1% عند الدفع بالمحفظة فقط
                                       </div>
                                     </>
-                                  )}
-                                  {!walletFeeInfo.enabled && (
+                                  ) : (
                                     <div className="p-2 text-xs text-green-700 rounded bg-green-50">
-                                      🎉 لا توجد رسوم إضافية على الدفع!
+                                      🎉 لا توجد رسوم إضافية على Instapay
                                     </div>
                                   )}
                                 </div>
@@ -1488,10 +1522,8 @@ export default function CheckoutPage() {
                               }}
                               existingProof={checkoutData.paymentProof}
                             />
-                          </div>
-                        )}
-                    </div>
-                  ))}
+                      </div>
+                    )}
                 </div>
               )}
             </section>
